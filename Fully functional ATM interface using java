@@ -1,0 +1,535 @@
+import java.io.; 
+import java.math.BigDecimal; 
+import java.math.RoundingMode; 
+import java.nio.charset.StandardCharsets; 
+import java.security.MessageDigest; 
+import java.security.SecureRandom; 
+import java.text.NumberFormat; 
+import java.time.LocalDate; 
+import java.time.LocalDateTime; 
+import java.time.format.DateTimeFormatter; 
+import java.util.;
+
+
+
+class ConsoleUI { private final Scanner scanner = new Scanner(System.in); private final Bank bank = Bank.loadOrCreate("bank.db");
+
+public void start() {
+    banner();
+    while (true) {
+        try {
+            System.out.println("\n==== Main Menu ====");
+            System.out.println("1) Create account");
+            System.out.println("2) Login to ATM");
+            System.out.println("3) Exit");
+            System.out.print("Choose: ");
+            String choice = scanner.nextLine().trim();
+            switch (choice) {
+                case "1" -> createAccount();
+                case "2" -> loginFlow();
+                case "3" -> {
+                    bank.save();
+                    System.out.println("Goodbye!");
+                    return;
+                }
+                default -> System.out.println("Invalid option.");
+            }
+        } catch (Exception e) {
+            System.out.println("Error: " + e.getMessage());
+        }
+    }
+}
+
+private void banner() {
+    System.out.println("====================================");
+    System.out.println("        Welcome to CLI ATM");
+    System.out.println("====================================");
+}
+
+private void createAccount() {
+    System.out.println("\n-- Create Account --");
+    System.out.print("Full name: ");
+    String name = scanner.nextLine().trim();
+    if (name.isEmpty()) {
+        System.out.println("Name cannot be empty.");
+        return;
+    }
+    String pin = promptPin("Set a 4-6 digit PIN: ");
+    if (pin == null) return;
+    String confirm = promptPin("Confirm PIN: ");
+    if (confirm == null) return;
+    if (!pin.equals(confirm)) {
+        System.out.println("PINs do not match.");
+        return;
+    }
+    Account acct = bank.createAccount(name, pin);
+    bank.save();
+    System.out.println("\nAccount created successfully!");
+    System.out.println("Card Number: " + acct.cardNumber());
+    System.out.println("Keep it safe. You'll need it along with your PIN to login.");
+}
+
+private String promptPin(String prompt) {
+    System.out.print(prompt);
+    String pin = scanner.nextLine().trim();
+    if (!pin.matches("\\d{4,6}")) {
+        System.out.println("PIN must be 4 to 6 digits.");
+        return null;
+    }
+    return pin;
+}
+
+private void loginFlow() {
+    System.out.println("\n-- Login --");
+    System.out.print("Card number: ");
+    String card = scanner.nextLine().trim();
+    System.out.print("PIN: ");
+    String pin = scanner.nextLine().trim();
+
+    Optional<Account> acctOpt = bank.authenticate(card, pin);
+    if (acctOpt.isEmpty()) return;
+
+    Account acct = acctOpt.get();
+    System.out.println("\nLogin successful. Welcome, " + acct.getName() + "!");
+    boolean keepGoing = true;
+    while (keepGoing) {
+        System.out.println("\n==== ATM Menu ====");
+        System.out.println("1) Balance");
+        System.out.println("2) Deposit");
+        System.out.println("3) Withdraw");
+        System.out.println("4) Transfer");
+        System.out.println("5) Mini statement");
+        System.out.println("6) Export full statement (CSV)");
+        System.out.println("7) Change PIN");
+        System.out.println("8) Logout");
+        System.out.print("Choose: ");
+        String ch = scanner.nextLine().trim();
+        try {
+            switch (ch) {
+                case "1" -> System.out.println("Balance: " + money(acct.getBalance()));
+                case "2" -> deposit(acct);
+                case "3" -> withdraw(acct);
+                case "4" -> transfer(acct);
+                case "5" -> miniStatement(acct);
+                case "6" -> exportCSV(acct);
+                case "7" -> changePin(acct);
+                case "8" -> keepGoing = false;
+                default -> System.out.println("Invalid option.");
+            }
+        } catch (Exception e) {
+            System.out.println("Operation failed: " + e.getMessage());
+        } finally {
+            bank.save();
+        }
+    }
+    System.out.println("Logged out.\n");
+}
+
+private void deposit(Account acct) {
+    System.out.print("Amount to deposit: ");
+    BigDecimal amt = readMoney(scanner.nextLine());
+    if (amt == null) return;
+    acct.deposit(amt);
+    System.out.println("Deposited " + money(amt) + ". New balance: " + money(acct.getBalance()));
+}
+
+private void withdraw(Account acct) {
+    System.out.print("Amount to withdraw: ");
+    BigDecimal amt = readMoney(scanner.nextLine());
+    if (amt == null) return;
+    acct.withdraw(amt);
+    System.out.println("Dispensed " + money(amt) + ". New balance: " + money(acct.getBalance()));
+}
+
+private void transfer(Account acct) {
+    System.out.print("Recipient card number: ");
+    String toCard = scanner.nextLine().trim();
+    Account to = bank.findByCard(toCard);
+    if (to == null) {
+        System.out.println("Recipient not found.");
+        return;
+    }
+    if (to.getId().equals(acct.getId())) {
+        System.out.println("Cannot transfer to the same account.");
+        return;
+    }
+    System.out.print("Amount to transfer: ");
+    BigDecimal amt = readMoney(scanner.nextLine());
+    if (amt == null) return;
+    acct.transferTo(to, amt);
+    System.out.println("Transferred " + money(amt) + " to " + to.getName() + ". New balance: " + money(acct.getBalance()));
+}
+
+private void miniStatement(Account acct) {
+    System.out.print("How many recent transactions? (default 10): ");
+    String nStr = scanner.nextLine().trim();
+    int n = 10;
+    if (!nStr.isEmpty()) {
+        try { n = Math.max(1, Integer.parseInt(nStr)); } catch (NumberFormatException ignored) {}
+    }
+    List<Transaction> recent = acct.recentTransactions(n);
+    if (recent.isEmpty()) {
+        System.out.println("No transactions yet.");
+        return;
+    }
+    System.out.println("\n-- Mini Statement --");
+    for (Transaction t : recent) {
+        System.out.println(t);
+    }
+}
+
+private void exportCSV(Account acct) {
+    String file = "statement_" + acct.cardNumber() + ".csv";
+    try (PrintWriter pw = new PrintWriter(new File(file), StandardCharsets.UTF_8)) {
+        pw.println("Date,Type,Amount,Balance After,Details");
+        for (Transaction t : acct.getTransactions()) {
+            pw.printf("%s,%s,%s,%s,%s%n",
+                    t.time().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME),
+                    t.type(),
+                    t.amount().toPlainString(),
+                    t.balanceAfter().toPlainString(),
+                    escapeCSV(t.details()));
+        }
+    } catch (Exception e) {
+        System.out.println("Failed to export: " + e.getMessage());
+        return;
+    }
+    System.out.println("Exported to " + file);
+}
+
+private void changePin(Account acct) {
+    String current = promptPin("Current PIN: ");
+    if (current == null) return;
+    if (!acct.verifyPin(current)) {
+        System.out.println("Incorrect current PIN.");
+        return;
+    }
+    String pin = promptPin("New 4-6 digit PIN: ");
+    if (pin == null) return;
+    String confirm = promptPin("Confirm new PIN: ");
+    if (confirm == null) return;
+    if (!pin.equals(confirm)) {
+        System.out.println("PINs do not match.");
+        return;
+    }
+    acct.setPin(pin);
+    System.out.println("PIN changed successfully.");
+}
+
+private static String money(BigDecimal amt) {
+    NumberFormat nf = NumberFormat.getCurrencyInstance(Locale.getDefault());
+    return nf.format(amt);
+}
+
+private static BigDecimal readMoney(String s) {
+    try {
+        BigDecimal bd = new BigDecimal(s.trim());
+        if (bd.compareTo(BigDecimal.ZERO) <= 0) {
+            System.out.println("Amount must be positive.");
+            return null;
+        }
+        return bd.setScale(2, RoundingMode.HALF_UP);
+    } catch (Exception e) {
+        System.out.println("Invalid amount.");
+        return null;
+    }
+}
+
+private static String escapeCSV(String s) {
+    if (s == null) return "";
+    if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
+        return '"' + s.replace("\"", "\"\"") + '"';
+    }
+    return s;
+}
+
+}
+
+class Bank implements Serializable { private static final long serialVersionUID = 1L; private final Map<String, Account> accountsById = new HashMap<>(); private final Map<String, String> cardToId = new HashMap<>();
+
+private final String storagePath;
+
+private Bank(String storagePath) {
+    this.storagePath = storagePath;
+}
+
+public static Bank loadOrCreate(String storagePath) {
+    File f = new File(storagePath);
+    if (f.exists()) {
+        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(f))) {
+            Bank b = (Bank) ois.readObject();
+            b.reindex();
+            return b.withStorage(storagePath);
+        } catch (Exception e) {
+            System.out.println("Failed to load existing DB, creating new. Reason: " + e.getMessage());
+        }
+    }
+    return new Bank(storagePath);
+}
+
+private void reindex() {
+    cardToId.clear();
+    for (Account a : accountsById.values()) {
+        cardToId.put(a.cardNumber(), a.getId());
+    }
+}
+
+private Bank withStorage(String path) {
+    return this; // storagePath is final; we keep the original
+}
+
+public synchronized void save() {
+    try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(storagePath))) {
+        oos.writeObject(this);
+    } catch (IOException e) {
+        System.out.println("Warning: failed to save DB: " + e.getMessage());
+    }
+}
+
+public synchronized Account createAccount(String name, String pin) {
+    String id = UUID.randomUUID().toString();
+    String card = generateUniqueCardNumber();
+    Account acct = Account.create(id, name, card, pin);
+    accountsById.put(id, acct);
+    cardToId.put(card, id);
+    return acct;
+}
+
+public synchronized Optional<Account> authenticate(String card, String pin) {
+    Account acct = findByCard(card);
+    if (acct == null) {
+        System.out.println("Account not found.");
+        return Optional.empty();
+    }
+    if (acct.isLocked()) {
+        long mins = Math.max(1, (acct.lockedUntil - System.currentTimeMillis()) / 60000);
+        System.out.println("Account locked. Try again in ~" + mins + " minute(s).");
+        return Optional.empty();
+    }
+    if (acct.verifyPin(pin)) {
+        acct.resetFailures();
+        return Optional.of(acct);
+    } else {
+        acct.registerFailure();
+        if (acct.isLocked()) {
+            System.out.println("Too many attempts. Account locked for 5 minutes.");
+        } else {
+            System.out.println("Incorrect PIN. Attempts left: " + (3 - acct.failedAttempts));
+        }
+        save();
+        return Optional.empty();
+    }
+}
+
+public synchronized Account findByCard(String card) {
+    String id = cardToId.get(card);
+    return id == null ? null : accountsById.get(id);
+}
+
+private String generateUniqueCardNumber() {
+    // Simple 16-digit Luhn-valid number starting with 5222 (a random BIN-like prefix)
+    SecureRandom rnd = new SecureRandom();
+    while (true) {
+        int[] digits = new int[16];
+        digits[0] = 5; digits[1] = 2; digits[2] = 2; digits[3] = 2;
+        for (int i = 4; i < 15; i++) digits[i] = rnd.nextInt(10);
+        digits[15] = luhnCheckDigit(digits);
+        StringBuilder sb = new StringBuilder();
+        for (int d : digits) sb.append(d);
+        String candidate = sb.toString();
+        if (!cardToId.containsKey(candidate)) return candidate;
+    }
+}
+
+private static int luhnCheckDigit(int[] digits) {
+    int sum = 0;
+    for (int i = 0; i < 15; i++) {
+        int d = digits[i];
+        if ((i % 2) == 0) { // double every other starting at index 0 (for 16 digits)
+            d *= 2;
+            if (d > 9) d -= 9;
+        }
+        sum += d;
+    }
+    int mod = sum % 10;
+    return (10 - mod) % 10;
+}
+
+}
+
+class Account implements Serializable { private static final long serialVersionUID = 1L; private final String id; private final String name; private final String cardNumber; private byte[] pinHash; private byte[] pinSalt; private BigDecimal balance = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP); private final List<Transaction> transactions = new ArrayList<>();
+
+// Security / rate limit
+transient int failedAttempts = 0;
+transient long lockedUntil = 0L;
+
+// Withdrawal daily cap
+private BigDecimal withdrawnToday = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+private LocalDate withdrawnDate = LocalDate.now();
+private static final BigDecimal DAILY_LIMIT = new BigDecimal("1000.00");
+
+private Account(String id, String name, String cardNumber) {
+    this.id = id;
+    this.name = name;
+    this.cardNumber = cardNumber;
+}
+
+public static Account create(String id, String name, String cardNumber, String pin) {
+    Account a = new Account(id, name, cardNumber);
+    a.setPin(pin);
+    a.addTxn(Transaction.deposit(new BigDecimal("0.00"), a.balance, "Account opened"));
+    return a;
+}
+
+public String getId() { return id; }
+public String getName() { return name; }
+public String cardNumber() { return cardNumber; }
+public BigDecimal getBalance() { return balance; }
+
+public boolean verifyPin(String pin) {
+    try {
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        md.update(pinSalt);
+        byte[] hash = md.digest(pin.getBytes(StandardCharsets.UTF_8));
+        return Arrays.equals(hash, pinHash);
+    } catch (Exception e) {
+        return false;
+    }
+}
+
+public void setPin(String newPin) {
+    try {
+        SecureRandom rnd = new SecureRandom();
+        byte[] salt = new byte[16];
+        rnd.nextBytes(salt);
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        md.update(salt);
+        byte[] hash = md.digest(newPin.getBytes(StandardCharsets.UTF_8));
+        this.pinSalt = salt;
+        this.pinHash = hash;
+    } catch (Exception e) {
+        throw new RuntimeException("Failed to set PIN");
+    }
+}
+
+public boolean isLocked() {
+    return System.currentTimeMillis() < lockedUntil;
+}
+
+public void registerFailure() {
+    failedAttempts++;
+    if (failedAttempts >= 3) {
+        lockedUntil = System.currentTimeMillis() + 5 * 60 * 1000L; // 5 minutes
+        failedAttempts = 0; // reset counter after lock
+    }
+}
+
+public void resetFailures() {
+    failedAttempts = 0;
+    lockedUntil = 0L;
+}
+
+public void deposit(BigDecimal amount) {
+    requirePositive(amount);
+    balance = balance.add(amount);
+    addTxn(Transaction.deposit(amount, balance, "Cash deposit"));
+}
+
+public void withdraw(BigDecimal amount) {
+    requirePositive(amount);
+    rollDailyWindow();
+    if (amount.compareTo(balance) > 0) throw new IllegalArgumentException("Insufficient funds");
+    if (withdrawnToday.add(amount).compareTo(DAILY_LIMIT) > 0) {
+        BigDecimal remaining = DAILY_LIMIT.subtract(withdrawnToday).max(BigDecimal.ZERO);
+        throw new IllegalArgumentException("Daily ATM limit exceeded. Remaining today: " + remaining);
+    }
+    balance = balance.subtract(amount);
+    withdrawnToday = withdrawnToday.add(amount);
+    addTxn(Transaction.withdraw(amount, balance, "ATM cash withdrawal"));
+}
+
+public void transferTo(Account other, BigDecimal amount) {
+    requirePositive(amount);
+    if (this == other) throw new IllegalArgumentException("Cannot transfer to same account");
+    if (amount.compareTo(balance) > 0) throw new IllegalArgumentException("Insufficient funds");
+    this.balance = this.balance.subtract(amount);
+    other.balance = other.balance.add(amount);
+    this.addTxn(Transaction.transferOut(amount, this.balance, "To " + other.getName() + " (" + other.cardNumber + ")"));
+    other.addTxn(Transaction.transferIn(amount, other.balance, "From " + this.getName() + " (" + this.cardNumber + ")"));
+}
+
+private void requirePositive(BigDecimal amount) {
+    if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+        throw new IllegalArgumentException("Amount must be positive");
+    }
+    if (amount.scale() > 2) {
+        throw new IllegalArgumentException("Use at most 2 decimal places");
+    }
+}
+
+private void rollDailyWindow() {
+    LocalDate today = LocalDate.now();
+    if (!Objects.equals(today, withdrawnDate)) {
+        withdrawnDate = today;
+        withdrawnToday = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+    }
+}
+
+public List<Transaction> getTransactions() { return Collections.unmodifiableList(transactions); }
+
+public List<Transaction> recentTransactions(int n) {
+    int size = transactions.size();
+    int from = Math.max(0, size - n);
+    return transactions.subList(from, size);
+}
+
+private void addTxn(Transaction t) { transactions.add(t); }
+
+}
+
+class Transaction implements Serializable { private static final long serialVersionUID = 1L; public enum Type { DEPOSIT, WITHDRAWAL, TRANSFER_IN, TRANSFER_OUT }
+
+private final LocalDateTime time;
+private final Type type;
+private final BigDecimal amount;
+private final BigDecimal balanceAfter;
+private final String details;
+
+private Transaction(LocalDateTime time, Type type, BigDecimal amount, BigDecimal balanceAfter, String details) {
+    this.time = time;
+    this.type = type;
+    this.amount = amount;
+    this.balanceAfter = balanceAfter;
+    this.details = details;
+}
+
+public static Transaction deposit(BigDecimal amt, BigDecimal balAfter, String details) {
+    return new Transaction(LocalDateTime.now(), Type.DEPOSIT, amt, balAfter, details);
+}
+
+public static Transaction withdraw(BigDecimal amt, BigDecimal balAfter, String details) {
+    return new Transaction(LocalDateTime.now(), Type.WITHDRAWAL, amt, balAfter, details);
+}
+
+public static Transaction transferIn(BigDecimal amt, BigDecimal balAfter, String details) {
+    return new Transaction(LocalDateTime.now(), Type.TRANSFER_IN, amt, balAfter, details);
+}
+
+public static Transaction transferOut(BigDecimal amt, BigDecimal balAfter, String details) {
+    return new Transaction(LocalDateTime.now(), Type.TRANSFER_OUT, amt, balAfter, details);
+}
+
+public LocalDateTime time() { return time; }
+public Type type() { return type; }
+public BigDecimal amount() { return amount; }
+public BigDecimal balanceAfter() { return balanceAfter; }
+public String details() { return details; }
+
+@Override public String toString() {
+    DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+    return String.format("%s  %-12s  %8s  Bal: %8s  %s",
+            fmt.format(time), type, amount.toPlainString(), balanceAfter.toPlainString(), details);
+}
+
+}
+
